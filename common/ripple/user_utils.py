@@ -264,6 +264,7 @@ async def ban(user_id: int) -> None:
             ~(
                 privileges.USER_NORMAL
                 | privileges.USER_PUBLIC
+                # Seems appropriate to remove pending verification here
                 | privileges.USER_PENDING_VERIFICATION
             ),
             user_id,
@@ -591,11 +592,14 @@ async def associate_user_with_hwids_and_restrict_if_multiaccounting(
             # Running under wine, check by unique id
             logger.debug("Logging Linux/Mac hardware")
             banned = await glob.db.fetchAll(
-                """SELECT users.id as userid, hw_user.occurencies, users.username FROM hw_user
+                """
+                SELECT users.id as userid, hw_user.occurencies, users.username
+                FROM hw_user
                 LEFT JOIN users ON users.id = hw_user.userid
                 WHERE hw_user.userid != %(userid)s
                 AND hw_user.unique_id = %(uid)s
-                AND (users.privileges & 3 != 3)""",
+                AND (users.privileges & 3 != 3)
+                """,
                 {
                     "userid": user_id,
                     "uid": hwid_set[3],
@@ -605,13 +609,16 @@ async def associate_user_with_hwids_and_restrict_if_multiaccounting(
             # Running under windows, do all checks
             logger.debug("Logging Windows hardware")
             banned = await glob.db.fetchAll(
-                """SELECT users.id as userid, hw_user.occurencies, users.username FROM hw_user
+                """
+                SELECT users.id as userid, hw_user.occurencies, users.username
+                FROM hw_user
                 LEFT JOIN users ON users.id = hw_user.userid
                 WHERE hw_user.userid != %(userid)s
                 AND hw_user.mac = %(mac)s
                 AND hw_user.unique_id = %(uid)s
                 AND hw_user.disk_id = %(diskid)s
-                AND (users.privileges & 3 != 3)""",
+                AND (users.privileges & 3 != 3)
+                """,
                 {
                     "userid": user_id,
                     "mac": hwid_set[2],
@@ -627,7 +634,11 @@ async def associate_user_with_hwids_and_restrict_if_multiaccounting(
 
             # Get the total numbers of logins
             user_hwids_count_rec = await glob.db.fetch(
-                "SELECT COUNT(*) AS count FROM hw_user WHERE userid = %s",
+                """
+                SELECT COUNT(*) AS count
+                FROM hw_user
+                WHERE userid = %s
+                """,
                 [user_id],
             )
             # and make sure it is valid
@@ -652,9 +663,10 @@ async def associate_user_with_hwids_and_restrict_if_multiaccounting(
     # Update hash set occurencies
     await glob.db.execute(
         """
-                INSERT INTO hw_user (id, userid, mac, unique_id, disk_id, occurencies) VALUES (NULL, %s, %s, %s, %s, 1)
-                ON DUPLICATE KEY UPDATE occurencies = occurencies + 1
-                """,
+        INSERT INTO hw_user (id, userid, mac, unique_id, disk_id, occurencies)
+        VALUES (NULL, %s, %s, %s, %s, 1)
+        ON DUPLICATE KEY UPDATE occurencies = occurencies + 1
+        """,
         [user_id, hwid_set[2], hwid_set[3], hwid_set[4]],
     )
 
@@ -685,6 +697,62 @@ async def grant_user_default_privileges(user_id: int) -> None:
     )
 
 
+WINE_STATIC_MAC_ADDRESS = "b4ec3c4334a0249dae95c284ec5983df"
+WINE_STATIC_DISK_ID = "ffae06fb022871fe9beb58b005c5e21d"
+
+
+def _hwid_set_running_under_wine(hwid_set: list[str]) -> bool:
+    return hwid_set[2] == WINE_STATIC_MAC_ADDRESS or hwid_set[4] == WINE_STATIC_DISK_ID
+
+
+async def find_user_ids_with_hwid_matches(
+    user_id: int,
+    hwid_set: list[str],
+) -> list[int]:
+    """\
+    Find any users using the same set of hardware identifiers.
+
+    In practice, we use this to determine users re-using the same hardware.
+
+    This often a common sign of multi-accounting, which is against our ToS.
+    """
+    if _hwid_set_running_under_wine(hwid_set):
+        # Running under wine, check only by uniqueid
+        matching_records = await glob.db.fetchAll(
+            """
+            SELECT userid
+            FROM hw_user
+            WHERE unique_id = %(uid)s
+            AND userid != %(userid)s
+            AND activated = 1
+            LIMIT 1
+            """,
+            {"uid": hwid_set[3], "userid": user_id},
+        )
+    else:
+        # Running under windows, full check
+        matching_records = await glob.db.fetchAll(
+            """
+            SELECT userid
+            FROM hw_user
+            WHERE mac = %(mac)s
+            AND unique_id = %(uid)s
+            AND disk_id = %(diskid)s
+            AND userid != %(userid)s
+            AND activated = 1
+            LIMIT 1
+            """,
+            {
+                "mac": hwid_set[2],
+                "uid": hwid_set[3],
+                "diskid": hwid_set[4],
+                "userid": user_id,
+            },
+        )
+
+    return [rec["userid"] for rec in matching_records]
+
+
 async def authorize_login_and_activate_new_account(
     user_id: int,
     # TODO: refactor hwid sets into an object across the codebase
@@ -696,58 +764,36 @@ async def authorize_login_and_activate_new_account(
     """
     username = await get_username_from_id(user_id)
 
-    # Make sure there are no other accounts activated with this exact mac/unique id/hwid
-    if (
-        hwid_set[2] == "b4ec3c4334a0249dae95c284ec5983df"
-        or hwid_set[4] == "ffae06fb022871fe9beb58b005c5e21d"
-    ):
-        # Running under wine, check only by uniqueid
-        await audit_logs.send_log_as_discord_webhook(
-            message=f"[{username}](https://akatsuki.gg/u/{user_id}) running under wine:\n**Full data:** {hwid_set}\n**Usual wine mac address hash:** b4ec3c4334a0249dae95c284ec5983df\n**Usual wine disk id:** ffae06fb022871fe9beb58b005c5e21d",
-            discord_channel="ac_confidential",
-        )
-        logger.debug("Veryfing with Linux/Mac hardware")
-        match = await glob.db.fetchAll(
-            "SELECT userid FROM hw_user WHERE unique_id = %(uid)s AND userid != %(userid)s AND activated = 1 LIMIT 1",
-            {"uid": hwid_set[3], "userid": user_id},
-        )
-    else:
-        # Running under windows, full check
-        logger.debug("Veryfing with Windows hardware")
-        match = await glob.db.fetchAll(
-            "SELECT userid FROM hw_user WHERE mac = %(mac)s AND unique_id = %(uid)s AND disk_id = %(diskid)s AND userid != %(userid)s AND activated = 1 LIMIT 1",
-            {
-                "mac": hwid_set[2],
-                "uid": hwid_set[3],
-                "diskid": hwid_set[4],
-                "userid": user_id,
-            },
-        )
+    user_ids_associated_with_device = await find_user_ids_with_hwid_matches(
+        user_id,
+        hwid_set,
+    )
 
-    if match:
-        # This is a multiaccount, restrict other account and ban this account
+    if user_ids_associated_with_device:
+        # There are other users associated with this set of hardware identifiers.
+        # We'll consider this a multi-account; restrict original account; ban this account.
 
-        # Get original user_id and username (lowest ID)
-        originalUserID = match[0]["userid"]
-        originalUsername: str | None = await get_username_from_id(originalUserID)
+        # Fetch their original account's information
+        original_user_id = user_ids_associated_with_device[0]
+        original_username = await get_username_from_id(original_user_id)
 
         # Ban this user and append notes
         await ban(user_id)  # this removes the USER_PENDING_VERIFICATION flag too
         await append_cm_notes(
             user_id,
-            f"{originalUsername}'s multiaccount ({originalUserID}), found HWID match while verifying account.",
+            f"{original_username}'s multiaccount ({original_user_id}), found HWID match while verifying account.",
         )
         await append_cm_notes(
-            originalUserID,
+            original_user_id,
             f"Has created multiaccount {username} ({user_id}).",
         )
 
         # Restrict the original
-        await restrict(originalUserID)
+        await restrict(original_user_id)
 
         # Discord message
         await audit_logs.send_log_as_discord_webhook(
-            message=f"[{originalUsername}](https://akatsuki.gg/u/{originalUserID}) has been restricted because they have created the multiaccount [{username}](https://akatsuki.gg/u/{user_id}). The multiaccount has been banned.",
+            message=f"[{original_username}](https://akatsuki.gg/u/{original_user_id}) has been restricted because they have created the multiaccount [{username}](https://akatsuki.gg/u/{user_id}). The multiaccount has been banned.",
             discord_channel="ac_general",
         )
 
@@ -880,7 +926,7 @@ async def remove_from_leaderboard(user_id: int) -> None:
         for board in ("leaderboard", "relaxboard"):
             for mode in ("std", "taiko", "ctb", "mania"):
                 await pipe.zrem(f"ripple:{board}:{mode}", str(user_id))
-                if country and country != "xx":
+                if country != "xx":
                     await pipe.zrem(f"ripple:{board}:{mode}:{country}", str(user_id))
 
         await pipe.execute()
@@ -909,7 +955,7 @@ async def remove_from_specified_leaderboard(
 
     async with glob.redis.pipeline() as pipe:
         await pipe.zrem(redis_board, str(user_id))
-        if country and country != "xx":
+        if country != "xx":
             await pipe.zrem(f"{redis_board}:{country}", str(user_id))
 
         await pipe.execute()

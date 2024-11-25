@@ -247,6 +247,14 @@ async def handle(web_handler: AsyncRequestHandler) -> tuple[str, bytes]:  # toke
             else:
                 # The user's freeze has expired; restrict them.
                 await user_utils.restrict(userID)
+
+                maybe_token = await osuToken.update_token(
+                    userToken["token_id"],
+                    privileges=userToken["privileges"] & ~privileges.USER_PUBLIC,
+                )
+                assert maybe_token is not None
+                userToken = maybe_token
+
                 await user_utils.unfreeze(
                     userID,
                     should_log_to_cm_notes_and_discord=False,

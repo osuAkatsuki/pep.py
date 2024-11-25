@@ -255,7 +255,6 @@ async def get_all_tokens_by_username(username: str) -> list[Token]:
     return [token for token in tokens if token["username"] == username]
 
 
-# TODO: the things that can actually be Optional need to have different defaults
 async def update_token(
     token_id: str,
     *,
