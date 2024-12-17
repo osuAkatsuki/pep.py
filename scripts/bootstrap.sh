@@ -34,6 +34,8 @@ elif [[ $APP_COMPONENT == "consume-pubsub-events" ]]; then
   exec /scripts/run-consume-pubsub-events.sh
 elif [[ $APP_COMPONENT == "trim-outdated-streams" ]]; then
   exec /scripts/run-trim-outdated-streams.sh
+elif [[ $APP_COMPONENT == "handle-irc-connections" ]]; then
+  exec /scripts/run-handle-irc-connections.sh
 else
   echo "Unknown APP_COMPONENT: $APP_COMPONENT"
   exit 1

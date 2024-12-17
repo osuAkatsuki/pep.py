@@ -58,3 +58,10 @@ run-spammer-silence-cron-bg:
 		--network=host \
 		--env-file=.env \
 		-d bancho-service:latest python3 -m bancho.spammer_silence_cron
+
+run-irc-handler:
+	docker run \
+		--env APP_COMPONENT=handle-irc-connections \
+		-p "6667:6667" \
+		--env-file=.env \
+		-it bancho-service:latest
