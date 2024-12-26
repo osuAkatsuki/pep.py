@@ -274,6 +274,7 @@ async def removebn(fro: str, chan: str, message: list[str]) -> str:
     )
     await user_utils.set_privileges(targetID, new_privileges)
     await user_utils.remove_user_badge(targetID, badges.BEATMAP_NOMINATION)
+    await user_utils.add_user_badge(targetID, badges.ALUMNI)
     await user_utils.set_absolute_donor_expiry_time(targetID, 0)
     target_tokens = await osuToken.get_all_tokens_by_user_id(targetID)
     for token in target_tokens:
